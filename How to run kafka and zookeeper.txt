@@ -1,0 +1,32 @@
+Starting ZooKeeper and Kafka on Windows involves downloading the binaries, setting up Java, and running two separate command prompt windows.
+Ensure you have Java (JDK) 17 or higher installed before beginning. 
+Follow these steps to start them locally: 
+1. Download and Extract Kafka 
+
+1. Go to the official  Apache Kafka Downloads 
+ page and download the latest binary release (e.g.,  or similar). 
+2. Extract the files using a tool like 7-Zip or WinRAR into a folder without spaces in the path (e.g., ).
+
+2. Open Command Prompt 
+Because ZooKeeper and Kafka need to run simultaneously, you will use two separate Command Prompt (cmd) windows. Open Command Prompt, and navigate to your Kafka folder:
+c:\> cd C:\kafka
+  
+3. Start ZooKeeper 
+In the first Command Prompt window, run the following command to start ZooKeeper, which acts as the cluster manager:
+C:\kafka> .\bin\windows\zookeeper-server-start.bat .\config\zookeeper.properties
+
+Leave this window open. 
+4. Start Kafka Server 
+Open a second Command Prompt window and navigate to the Kafka folder again:
+c:\> cd C:\kafka
+
+Run the following command to start the Kafka broker:
+C:\kafka> .\bin\windows\kafka-server-start.bat .\config\server.properties
+
+Leave this window open as well. 
+You now have a running local instance of Apache ZooKeeper on port  2081 and Kafka on port 9092.
+
+How to check cluster version
+C:\kafka> .\bin\windows\kafka-broker-api-versions.bat --bootstrap-server localhost:9092 --version
+
+

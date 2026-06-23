@@ -1,0 +1,10 @@
+### POST create new patient entity
+POST http://localhost:8081/api/v1/orders
+Content-Type: application/json
+
+{
+  "customerId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "totalAmount": 99.99
+}
+
+###

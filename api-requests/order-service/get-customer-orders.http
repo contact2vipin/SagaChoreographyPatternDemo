@@ -1,0 +1,4 @@
+### GET customer orders
+GET http://localhost:8081/api/v1/customers/f47ac10b-58cc-4372-a567-0e02b2c3d479
+
+###

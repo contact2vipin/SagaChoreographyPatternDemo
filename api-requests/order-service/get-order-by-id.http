@@ -1,0 +1,4 @@
+### GET get order by id
+GET http://localhost:8081/api/v1/orders/da58a893-5392-4649-af30-27ec2ada5883
+
+###
