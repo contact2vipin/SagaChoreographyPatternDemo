@@ -506,25 +506,243 @@ kafka-console-producer --topic order-created --bootstrap-server localhost:9092
 # Second delivery will be skipped (logged as duplicate)
 ```
 
+---
+
+### ✅ Implemented: Transactional Outbox Pattern
+
+This implementation now uses the **Transactional Outbox Pattern** to ensure atomic writes to database AND Kafka publishing:
+
+#### What Problem Does It Solve?
+
+**Scenario 1: DB Write Succeeds, Kafka Publish Fails**
+```
+Order created in DB ✓
+OrderCreatedEvent published to Kafka ✗ (network fails)
+→ Event is lost! Saga never proceeds. Order stuck in PENDING state.
+```
+
+**Scenario 2: Kafka Publish Succeeds, DB Write Fails**
+```
+OrderCreatedEvent published to Kafka ✓
+Order saved to DB ✗ (constraint violation)
+→ Orphaned event! Order doesn't exist but saga is processing.
+```
+
+#### How It Works (Hybrid Strategy)
+
+**Phase 1: Atomic Outbox Write**
+- Events written to `OUTBOX` table in same transaction as business logic
+- Either both succeed (atomically) or both fail (no inconsistency)
+- Outbox table persists events even if Kafka is temporarily down
+
+**Phase 2A: Polling-Based Publishing (Default)**
+- `OutboxPoller` scheduled task runs every 2 seconds
+- Scans `OUTBOX` table for unpublished events
+- Publishes to Kafka with retry logic
+- Marks events as `PUBLISHED` after successful send
+- **Low latency**: <5 seconds from DB write to Kafka publish
+
+**Phase 2B: CDC-Based Publishing (Optional)**
+- Change Data Capture alternative for real-time publishing
+- Uses Kafka Streams to monitor outbox table changes
+- Lower latency than polling (milliseconds)
+- Can be enabled via `outbox.cdc.enabled: true`
+
+#### Architecture
+
+**Outbox Table Schema (All Services):**
+```sql
+CREATE TABLE outbox (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    aggregate_id VARCHAR(255) NOT NULL,              -- Order ID
+    aggregate_type VARCHAR(100) NOT NULL,            -- "Order", "Inventory", "Payment"
+    event_type VARCHAR(255) NOT NULL,                -- Event class name
+    payload LONGTEXT NOT NULL,                       -- Serialized JSON event
+    timestamp BIGINT NOT NULL,                       -- Creation timestamp
+    published_at BIGINT,                             -- NULL if not published
+    retry_count INT NOT NULL DEFAULT 0,
+    status VARCHAR(50) NOT NULL DEFAULT 'PENDING',  -- PENDING, PUBLISHED, FAILED
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    
+    UNIQUE KEY uk_outbox_agg_type_event (aggregate_id, aggregate_type, event_type),
+    INDEX idx_outbox_published (published_at),
+    INDEX idx_outbox_created (created_at),
+    INDEX idx_outbox_status (status)
+);
+```
+
+**New Components Per Service:**
+- `Outbox.java`: JPA entity mapping to outbox table
+- `OutboxStatus.java`: Enum for PENDING, PUBLISHED, FAILED states
+- `OutboxRepository.java`: Spring Data JPA repository
+- `OutboxService.java`: Business logic for atomic outbox writes
+- `OutboxPoller.java`: Scheduled task for polling and publishing
+- `OutboxConfig.java`: Configuration for scheduling
+
+#### Implementation Details
+
+**Step 1: Atomic Write to Outbox**
+```java
+@Transactional
+public void publishToOutbox(Object event, String aggregateId, String aggregateType) {
+    // Serialize event to JSON
+    String payload = objectMapper.writeValueAsString(event);
+    
+    // Create outbox record
+    Outbox outbox = Outbox.builder()
+        .aggregateId(aggregateId)
+        .aggregateType(aggregateType)
+        .eventType(event.getClass().getSimpleName())
+        .payload(payload)
+        .timestamp(System.currentTimeMillis())
+        .status(OutboxStatus.PENDING)
+        .retryCount(0)
+        .build();
+    
+    outboxRepository.save(outbox);  // Saves in same transaction as business logic
+}
+```
+
+**Step 2: Polling & Publishing**
+```java
+@Scheduled(fixedDelayString = "${outbox.polling.interval-ms:2000}")
+public void pollAndPublish() {
+    // Get unpublished events (batch of 100)
+    List<Outbox> events = outboxRepository.findPendingEventsWithLimit(100);
+    
+    for (Outbox event : events) {
+        try {
+            // Publish to Kafka with partition key = aggregateId
+            kafkaTemplate.send(topic, event.getAggregateId(), event.getPayload()).get();
+            
+            // Mark as published ONLY after Kafka confirms
+            event.setStatus(OutboxStatus.PUBLISHED);
+            event.setPublishedAt(System.currentTimeMillis());
+            outboxRepository.save(event);
+            
+        } catch (Exception e) {
+            // Increment retry count, mark as FAILED if max retries exceeded
+            handlePublishFailure(event);
+        }
+    }
+}
+```
+
+**Step 3: Existing Services Use Outbox**
+```java
+// Before: Direct Kafka publish (not atomic)
+// orderKafkaProducer.sendOrderCreated(event);
+
+// After: Atomic outbox write
+orderKafkaProducer.sendOrderCreated(event);  // Delegates to outboxService
+                                              // ↓
+outboxService.publishToOutbox(event, orderId, "Order");  // Same transaction!
+```
+
+#### Configuration
+
+**application.yml (All Services):**
+```yaml
+outbox:
+  polling:
+    enabled: true                  # Enable polling-based publisher
+    interval-ms: 2000             # Poll every 2 seconds
+    batch-size: 100               # Max events per poll
+    max-retries: 3                # Max retries before marking FAILED
+    retry-backoff-ms: 1000        # Backoff time between retries
+  cdc:
+    enabled: false                # Optional: enable CDC-based publisher
+    enabled-if-polling-fails: true
+```
+
+#### Testing Transactional Outbox
+
+**Test 1: Verify Atomicity (DB write succeeds, event reaches outbox)**
+```bash
+# Create an order
+curl -X POST http://localhost:8001/api/v1/orders \
+  -H "Content-Type: application/json" \
+  -d '{"customerId": "f47ac10b-58cc-4372-a567-0e02b2c3d479", "totalAmount": 99.99}'
+
+# Check H2 console: http://localhost:8001/h2-console
+SELECT * FROM outbox WHERE status = 'PENDING' LIMIT 5;
+
+# Wait 2-5 seconds, outbox should change to PUBLISHED
+SELECT * FROM outbox WHERE status = 'PUBLISHED' LIMIT 5;
+```
+
+**Test 2: Verify Recovery After Kafka Outage**
+```bash
+# Start order service
+cd order-service && mvn spring-boot:run
+
+# Create multiple orders (without Kafka running)
+# Orders persist to outbox table
+for i in {1..5}; do
+  curl -X POST http://localhost:8001/api/v1/orders \
+    -H "Content-Type: application/json" \
+    -d "{\"customerId\": \"$(uuidgen)\", \"totalAmount\": $((99 + i))}"
+done
+
+# Start Kafka
+docker-compose up kafka
+
+# Wait 2-5 seconds, OutboxPoller picks up events and publishes
+# Verify via H2 or Kafka topic consumer
+kafka-console-consumer --topic order-created --bootstrap-server localhost:9092 --from-beginning
+```
+
+**Test 3: Verify Retry Logic**
+```bash
+# Manually trigger a publish failure by stopping Kafka
+# Check outbox table: retry_count should increment
+
+SELECT id, status, retry_count FROM outbox WHERE aggregate_type = 'Order';
+
+# After 3 retries, status should change to FAILED
+SELECT id, status FROM outbox WHERE status = 'FAILED';
+```
+
+#### Industry Standards Met
+
+✅ **Atomicity**: DB write + outbox record in single transaction (ACID-compliant)
+✅ **Durability**: Outbox table persists even if Kafka is down
+✅ **Idempotency**: Works seamlessly with existing ProcessedEvent deduplication
+✅ **Ordering**: Kafka partition key (aggregateId) ensures per-order event ordering
+✅ **Failure Recovery**: Polling ensures events aren't lost during Kafka outages
+✅ **Low Latency**: Configurable polling interval (default 2 seconds)
+✅ **Scalability**: Ready for distributed polling with row-level locks (optional)
+✅ **Observability**: Detailed logging of poll/publish/failure events
+
+#### Comparison: Before vs After
+
+| Aspect | Before | After |
+|--------|--------|-------|
+| **Event Durability** | Lost if Kafka down | Persisted in OUTBOX table |
+| **Atomicity** | Non-atomic (2 operations) | Atomic (1 transaction) |
+| **Publish Latency** | Immediate (best case) | <5 seconds (polling interval) |
+| **Failure Recovery** | Manual re-publishing | Automatic (poller retries) |
+| **Max Retries** | None built-in | Configurable (default 3) |
+| **State Tracking** | Not tracked | Visible in outbox table (PENDING/PUBLISHED/FAILED) |
+
+---
+
 ### Not Implemented (But Recommended for Production)
 
-1. **Transactional Outbox Pattern**
-   - Ensures Kafka publish AND database writes happen atomically
-   - Prevents "write to DB succeeds, publish fails" scenarios
-
-2. **Timeout Handling**
+1. **Timeout Handling**
    - Pure choreography has no built-in timeouts
    - Consider saga tables to track in-flight sagas
 
-3. **Event Versioning**
+2. **Event Versioning**
    - No backward compatibility for event schema changes
    - Add version field to events for evolution
 
-4. **Circuit Breakers**
+3. **Circuit Breakers**
    - Network failures can cascade across services
    - Add Resilience4j or similar
 
-5. **Centralized Logging**
+4. **Centralized Logging**
    - Use ELK Stack (Elasticsearch, Logstash, Kibana) for correlation
    - Trace events using `orderId` as correlation ID
 

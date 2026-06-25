@@ -32,6 +32,14 @@ spring:
 #      properties:
 #        spring.json.trusted.packages: "com.ecommerce"
 
+outbox:
+  polling:
+    enabled: true
+    interval-ms: 2000        # Poll every 2 seconds
+    batch-size: 100          # Max events per poll
+    max-retries: 3           # Max retries before marking as FAILED
+    retry-backoff-ms: 1000   # Backoff time between retries
+
 logging:
   level:
     root: INFO

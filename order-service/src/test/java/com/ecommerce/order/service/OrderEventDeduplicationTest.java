@@ -1,8 +1,10 @@
 package com.ecommerce.order.service;
 
+import com.ecommerce.order.entity.OrderStatus;
 import com.ecommerce.order.entity.ProcessedEvent;
 import com.ecommerce.order.repository.OrderRepository;
 import com.ecommerce.order.repository.ProcessedEventRepository;
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.Optional;
 import java.util.UUID;
@@ -12,6 +14,7 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
