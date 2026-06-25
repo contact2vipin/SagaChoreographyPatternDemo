@@ -24,6 +24,17 @@ public class PaymentService {
         Payment payment = paymentRepository.findByOrderId(orderId)
                 .orElse(Payment.builder().orderId(orderId).status(PaymentStatus.PENDING).build());
 
+        // Idempotency: If already processed, return cached result without charging again
+        if (payment.getStatus() == PaymentStatus.COMPLETED) {
+            log.info("Payment already completed for order {}. Returning cached result.", orderId);
+            return PaymentStatus.COMPLETED;
+        }
+
+        if (payment.getStatus() == PaymentStatus.FAILED) {
+            log.info("Payment already failed for order {}. Returning cached result.", orderId);
+            return PaymentStatus.FAILED;
+        }
+
         boolean success = ThreadLocalRandom.current().nextInt(10) < 8;
         payment.setAmount(amount);
 

@@ -473,29 +473,58 @@ SagaChoreographyPatternDemo/
 
 ## 🔧 Production Considerations
 
+### ✅ Implemented: Idempotency Guarantees
+
+This implementation now supports **at-least-once delivery semantics** with event deduplication:
+
+**How It Works:**
+1. **Event Deduplication Layer**
+   - Each service maintains a `processed_events` table to track handled events
+   - Event key format: `orderId:eventType` (unique constraint enforced)
+   - Before processing any event, check if already handled
+
+2. **Idempotent Listeners**
+   - `OrderKafkaListener`: Deduplicates INVENTORY_FAILED, PAYMENT_COMPLETED, PAYMENT_FAILED events
+   - `InventoryKafkaListener`: Deduplicates ORDER_CREATED, PAYMENT_FAILED events
+   - `PaymentKafkaListener`: Deduplicates INVENTORY_RESERVED events
+
+3. **Idempotent Business Logic**
+   - **Payment Service**: Cached result prevents double-charging same order
+   - **Inventory Service**: Uses `released` flag to prevent over-release
+   - **Order Service**: Checks existing status before state transitions (already idempotent)
+
+**Architecture:**
+- `EventDeduplicationService`: Core deduplication logic (query + record processed events)
+- `ProcessedEventRepository`: DB access for event tracking
+- Transactional operations ensure atomic recording of processed events
+
+**Testing Duplicate Delivery:**
+```bash
+# Manually publish same event twice to a topic to verify deduplication
+kafka-console-producer --topic order-created --bootstrap-server localhost:9092
+# Type the same JSON payload twice
+# Second delivery will be skipped (logged as duplicate)
+```
+
 ### Not Implemented (But Recommended for Production)
 
 1. **Transactional Outbox Pattern**
    - Ensures Kafka publish AND database writes happen atomically
    - Prevents "write to DB succeeds, publish fails" scenarios
 
-2. **Idempotent Listeners**
-   - Current implementation assumes exactly-once delivery
-   - Add deduplication logic for at-least-once guarantees
-
-3. **Timeout Handling**
+2. **Timeout Handling**
    - Pure choreography has no built-in timeouts
    - Consider saga tables to track in-flight sagas
 
-4. **Event Versioning**
+3. **Event Versioning**
    - No backward compatibility for event schema changes
    - Add version field to events for evolution
 
-5. **Circuit Breakers**
+4. **Circuit Breakers**
    - Network failures can cascade across services
    - Add Resilience4j or similar
 
-6. **Centralized Logging**
+5. **Centralized Logging**
    - Use ELK Stack (Elasticsearch, Logstash, Kibana) for correlation
    - Trace events using `orderId` as correlation ID
 
